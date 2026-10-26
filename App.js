@@ -3642,20 +3642,94 @@ ${errorSummary}
         const mandatoryForAllocation = palletsForTrucks.filter(p => p.isMandatory);
         const normalForAllocation = palletsForTrucks.filter(p => !p.isMandatory);
 
-        // Argentina uses specialized COMFORT grouping algorithm
+        // Argentina uses a two-phase allocation: estoque1 pure trucks first,
+        // then leftover estoque1 combined with estoque2. All other countries
+        // use single-pass genetic allocation with mixed categories.
         if (country === 'ARG') {
-          trucks = this.allocateTrucksARGComfortGrouping(
-            mandatoryForAllocation,
-            normalForAllocation,
+          const truckCap = PALLETS_PER_TRUCK[country] || 28;
+          const maxSkusLimit = config.max_skus_por_caminhao_arg || 0;
+
+          const runArgPostProcessing = (input) => {
+            let out = this.consolidateHighPriorityItems(input, country, truckMaxWeight);
+            out = this.consolidateSpecificSkus(out, country, truckMaxWeight);
+            out = this.consolidateScatteredSkus(out, country, truckMaxWeight, {
+              minScatterCount: 4,
+              minTrucksScattered: 2,
+              excludeSkus: ['68472205', '68568095']
+            });
+            out = this.consolidateComfortTrucks(out, truckMaxWeight);
+            if (maxSkusLimit > 0) {
+              out = this.enforceMaxSkusPerTruck(out, maxSkusLimit, truckCap, truckMaxWeight, config.ocupacao_minima_percentual);
+            }
+            return out;
+          };
+
+          // Split pallets by categoria for the two-phase run
+          const isE1 = (p) => (p.categoria || 'estoque1') === 'estoque1';
+          const e1Mandatory = mandatoryForAllocation.filter(isE1);
+          const e1Normal = normalForAllocation.filter(isE1);
+          const e2Mandatory = mandatoryForAllocation.filter(p => !isE1(p));
+          const e2Normal = normalForAllocation.filter(p => !isE1(p));
+
+          // Tag every pallet with a persistent id. Object identity does not
+          // survive the genetic algorithm because it clones via JSON serialize,
+          // so we track pallets by an id that rides along with the clones.
+          let _nextPid = 0;
+          const tagPid = (p) => { p._persistentId = _nextPid++; return p; };
+          e1Mandatory.forEach(tagPid);
+          e1Normal.forEach(tagPid);
+          e2Mandatory.forEach(tagPid);
+          e2Normal.forEach(tagPid);
+
+          // PHASE A: pure estoque1 trucks
+          let phaseATrucks = this.allocateTrucksARGComfortGrouping(
+            e1Mandatory,
+            e1Normal,
             config.ocupacao_minima_percentual,
             config.ocupacao_minima_obrigatorios,
             config.priorizar_completar_caminhao,
             truckMaxWeight,
-            config.max_skus_por_caminhao_arg || 0
+            maxSkusLimit
           );
+          phaseATrucks = runArgPostProcessing(phaseATrucks);
+
+          // Identify pallets consumed in Phase A by persistent id
+          const usedInA = new Set();
+          for (const truck of phaseATrucks) {
+            for (const p of truck.pallets) {
+              if (p._persistentId !== undefined) usedInA.add(p._persistentId);
+            }
+          }
+          const leftoverE1Mandatory = e1Mandatory.filter(p => !usedInA.has(p._persistentId));
+          const leftoverE1Normal = e1Normal.filter(p => !usedInA.has(p._persistentId));
+
+          // PHASE B: leftover estoque1 combined with estoque2
+          const phaseBMandatory = [...leftoverE1Mandatory, ...e2Mandatory];
+          const phaseBNormal = [...leftoverE1Normal, ...e2Normal];
+
+          let phaseBTrucks = this.allocateTrucksARGComfortGrouping(
+            phaseBMandatory,
+            phaseBNormal,
+            config.ocupacao_minima_percentual,
+            config.ocupacao_minima_obrigatorios,
+            config.priorizar_completar_caminhao,
+            truckMaxWeight,
+            maxSkusLimit
+          );
+          phaseBTrucks = runArgPostProcessing(phaseBTrucks);
+
+          // Strip _persistentId from every pallet in the final output
+          const stripPid = (t) => ({
+            ...t,
+            pallets: t.pallets.map(p => {
+              const { _persistentId, ...rest } = p;
+              return rest;
+            })
+          });
+          trucks = [...phaseATrucks, ...phaseBTrucks].map(stripPid);
 
         } else {
-          // All other countries use genetic algorithm
+          // All other countries use genetic algorithm with combined pool
           trucks = this.allocateTrucksGenetic(
             country,
             mandatoryForAllocation,
@@ -3665,31 +3739,14 @@ ${errorSummary}
             config.priorizar_completar_caminhao,
             truckMaxWeight
           );
-        }
 
-        // Post-allocation optimization: consolidate high priority items in first trucks
-        trucks = this.consolidateHighPriorityItems(trucks, country, truckMaxWeight);
-
-        // Consolidate specific SKUs (68472205 and 68568095) in same truck when possible
-        trucks = this.consolidateSpecificSkus(trucks, country, truckMaxWeight);
-
-        // Generic SKU consolidation: pull scattered SKUs together to minimize order spread
-        trucks = this.consolidateScatteredSkus(trucks, country, truckMaxWeight, {
-          minScatterCount: 4,
-          minTrucksScattered: 2,
-          excludeSkus: ['68472205', '68568095']
-        });
-
-        // Argentina only: consolidate COMFORT products into minimum number of trucks
-        // Runs last to prevent being undone by other consolidations
-        if (country === 'ARG') {
-          trucks = this.consolidateComfortTrucks(trucks, truckMaxWeight);
-        }
-
-        // Enforce max SKUs per truck for ARG after all post-processing
-        const maxSkusLimit = (config.max_skus_por_caminhao_arg || 0);
-        if (country === 'ARG' && maxSkusLimit > 0) {
-          trucks = this.enforceMaxSkusPerTruck(trucks, maxSkusLimit, PALLETS_PER_TRUCK[country] || 28, truckMaxWeight, config.ocupacao_minima_percentual);
+          trucks = this.consolidateHighPriorityItems(trucks, country, truckMaxWeight);
+          trucks = this.consolidateSpecificSkus(trucks, country, truckMaxWeight);
+          trucks = this.consolidateScatteredSkus(trucks, country, truckMaxWeight, {
+            minScatterCount: 4,
+            minTrucksScattered: 2,
+            excludeSkus: ['68472205', '68568095']
+          });
         }
 
         // Debug SKU 64947665 in CHI trucks
@@ -4103,7 +4160,8 @@ ${errorSummary}
           priority: priorityMap[`${country}|${codUpper}`] || 1,
           isMandatory,
           contrato,
-          linha
+          linha,
+          categoria: row.categoria || 'estoque1'
         });
         currentStock -= allocatedBoxes;
       }
@@ -4122,7 +4180,7 @@ ${errorSummary}
   palletizeAdvanced(products, allowFractional) {
     const pallets = [];
 
-    for (const { sku, desc, allocatedBoxes, ppd, boxWeight, priority, isMandatory, contrato, linha } of products) {
+    for (const { sku, desc, allocatedBoxes, ppd, boxWeight, priority, isMandatory, contrato, linha, categoria } of products) {
       const fullPallets = Math.floor(allocatedBoxes / ppd);
       const remainingBoxes = allocatedBoxes % ppd;
 
@@ -4137,7 +4195,8 @@ ${errorSummary}
           quantity: 1.0,
           isMandatory,
           contrato,
-          linha
+          linha,
+          categoria: categoria || 'estoque1'
         });
       }
 
@@ -4154,7 +4213,8 @@ ${errorSummary}
           isMandatory,
           isFractional: true,
           contrato,
-          linha
+          linha,
+          categoria: categoria || 'estoque1'
         });
       }
     }
@@ -6519,7 +6579,7 @@ ${errorSummary}
 
   palletize(products) {
     const pallets = [];
-    for (const { sku, desc, allocatedBoxes, ppd, boxWeight, priority, contrato, linha } of products) {
+    for (const { sku, desc, allocatedBoxes, ppd, boxWeight, priority, contrato, linha, categoria } of products) {
       const quantity = Math.floor(allocatedBoxes / ppd);
       for (let i = 0; i < quantity; i++) {
         pallets.push({
@@ -6531,7 +6591,8 @@ ${errorSummary}
           quantity: 1.0,
           isMandatory: false,
           contrato,
-          linha
+          linha,
+          categoria: categoria || 'estoque1'
         });
       }
     }

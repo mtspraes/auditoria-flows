@@ -1169,3 +1169,97 @@ export const ind_historico = {
     return { error };
   }
 };
+
+// ========== INDAIATUBA - TABELA DE REFERENCIA (fator + peso_pallet) ==========
+
+export const ind_reference_table = {
+  getAll: async () => {
+    let allData = [];
+    let page = 0;
+    const pageSize = 1000;
+    let hasMore = true;
+
+    while (hasMore) {
+      const { data, error } = await supabase
+        .from('ind_reference_table')
+        .select('*')
+        .range(page * pageSize, (page + 1) * pageSize - 1)
+        .order('cod', { ascending: true });
+
+      if (error) return { data: null, error };
+
+      if (data && data.length > 0) {
+        allData = allData.concat(data);
+        if (data.length < pageSize) hasMore = false;
+        page++;
+      } else {
+        hasMore = false;
+      }
+    }
+
+    return { data: allData, error: null };
+  },
+
+  insertMany: async (items) => {
+    const user = await auth.getCurrentUser();
+    if (!user) return { error: { message: 'Usuario nao autenticado' } };
+
+    const toNumber = (v) => {
+      if (v === null || v === undefined || v === '') return NaN;
+      return parseFloat(String(v).trim().replace(',', '.'));
+    };
+
+    const mapped = items.map(item => {
+      const keys = Object.keys(item);
+
+      const skuKey = keys.find(k => {
+        const l = k.toLowerCase().trim();
+        return l === 'sku' || l === 'cod' || l === 'codigo' || l === 'código' || l.includes('sku') || l.includes('cod');
+      });
+
+      const fatorKey = keys.find(k => {
+        const l = k.toLowerCase().trim();
+        return l === 'fator' || l === 'factor';
+      });
+
+      const pesoKey = keys.find(k => {
+        const l = k.toLowerCase().trim();
+        return l === 'pesopallet' || l === 'peso_pallet' || l === 'peso pallet'
+            || l === 'pesopalete' || l === 'peso palete'
+            || l === 'peso' || l.includes('peso');
+      });
+
+      const cod = skuKey ? String(item[skuKey]).trim().toUpperCase() : '';
+      const fator = fatorKey ? toNumber(item[fatorKey]) : NaN;
+      const peso_pallet = pesoKey ? toNumber(item[pesoKey]) : NaN;
+
+      return { user_id: user.id, cod, fator, peso_pallet };
+    }).filter(item => item.cod && Number.isFinite(item.fator) && item.fator > 0
+                   && Number.isFinite(item.peso_pallet) && item.peso_pallet > 0);
+
+    if (mapped.length === 0) {
+      return { error: { message: 'Nenhuma linha valida. Esperado: colunas SKU/COD, Fator, PesoPallet (ou Peso).' } };
+    }
+
+    // Dedup por cod, mantendo a ultima ocorrencia
+    const dedup = new Map();
+    mapped.forEach(item => dedup.set(item.cod, item));
+    const unique = Array.from(dedup.values());
+
+    const { data, error } = await supabase
+      .from('ind_reference_table')
+      .insert(unique);
+    return { data, error };
+  },
+
+  deleteAll: async () => {
+    const user = await auth.getCurrentUser();
+    if (!user) return { error: { message: 'Usuario nao autenticado' } };
+
+    const { error } = await supabase
+      .from('ind_reference_table')
+      .delete()
+      .neq('id', '00000000-0000-0000-0000-000000000000');
+    return { error };
+  }
+};

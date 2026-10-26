@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sistema de Alocação de Caminhões - Unilever</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- XLSX Library (para processar Excel no navegador) -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+        'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+        sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    
+    #root {
+      min-height: 100vh;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+
+    /* Loading spinner */
+    .spinner {
+      border: 3px solid rgba(255, 255, 255, 0.3);
+      border-radius: 50%;
+      border-top-color: white;
+      width: 40px;
+      height: 40px;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* Animações suaves */
+    .fade-in {
+      animation: fadeIn 0.3s ease-in;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Scrollbar customizada */
+    ::-webkit-scrollbar {
+      width: 10px;
+      height: 10px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: #f1f1f1;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: #888;
+      border-radius: 5px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: #555;
+    }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <div class="flex items-center justify-center min-h-screen">
+      <div class="spinner"></div>
+    </div>
+  </div>
+
+  <!-- Detectar recovery ANTES de carregar o Supabase -->
+  <script>
+    // Verificar se é recovery ANTES do Supabase processar a URL
+    // NÃO limpar a URL aqui - deixar o Supabase processar primeiro
+    (function() {
+      const hash = window.location.hash;
+      if (hash.includes('type=recovery') || hash.includes('type=invite')) {
+        console.log('Recovery flow detected - setting flag');
+        sessionStorage.setItem('passwordRecoveryMode', 'true');
+        window.isInRecoveryMode = true; // Flag global imediata
+      }
+    })();
+  </script>
+
+  <!-- App como módulo ES6 -->
+  <script type="module">
+    // Importar apenas supabaseClient inicialmente (App carregado dinamicamente)
+    const { supabase, auth } = await import('./supabaseClient.js');
+
+    const root = document.getElementById('root');
+    let currentApp = null;
+
+    // Função global para trocar armazém
+    window.switchWarehouse = () => {
+      sessionStorage.removeItem('selectedWarehouse');
+      location.reload();
+    };
+
+    // Carregar App baseado na escolha do armazém
+    async function loadApp(warehouse, user) {
+      let AppClass;
+      if (warehouse === 'indaiatuba') {
+        const mod = await import('./AppIndaiatuba.js');
+        AppClass = mod.App;
+      } else {
+        const mod = await import('./App.js');
+        AppClass = mod.App;
+      }
+
+      currentApp = new AppClass(root, user);
+      return currentApp;
+    }
+
+    // Mostrar seletor de armazém
+    function showWarehouseSelector(user) {
+      root.innerHTML = `
+        <div class="min-h-screen flex items-center justify-center p-4">
+          <div class="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-lg text-center" style="animation: fadeIn 0.3s ease-out">
+            <div class="w-20 h-20 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full mx-auto mb-4 flex items-center justify-center">
+              <i data-lucide="warehouse" class="w-10 h-10 text-white"></i>
+            </div>
+            <h1 class="text-3xl font-bold text-gray-800 mb-2">Selecionar Armazem</h1>
+            <p class="text-gray-500 mb-2">${user.email}</p>
+            <p class="text-gray-600 mb-8">Escolha o armazem para alocacao</p>
+            <div class="grid grid-cols-2 gap-4 mb-6">
+              <button id="selectHUB" class="bg-gradient-to-r from-blue-500 to-purple-600 text-white p-6 rounded-xl hover:shadow-lg transform hover:scale-[1.02] transition cursor-pointer">
+                <i data-lucide="building-2" class="w-12 h-12 mx-auto mb-3"></i>
+                <div class="text-xl font-bold">HUB</div>
+                <div class="text-sm opacity-80 mt-1">20 paises</div>
+              </button>
+              <button id="selectIND" class="bg-gradient-to-r from-green-500 to-green-700 text-white p-6 rounded-xl hover:shadow-lg transform hover:scale-[1.02] transition cursor-pointer">
+                <i data-lucide="factory" class="w-12 h-12 mx-auto mb-3"></i>
+                <div class="text-xl font-bold">Indaiatuba</div>
+                <div class="text-sm opacity-80 mt-1">ARG + PAR (Po)</div>
+              </button>
+            </div>
+            <button id="btnLogoutSelector" class="text-sm text-gray-400 hover:text-gray-600 transition">Sair</button>
+          </div>
+        </div>`;
+      lucide.createIcons();
+
+      document.getElementById('selectHUB').addEventListener('click', async () => {
+        sessionStorage.setItem('selectedWarehouse', 'hub');
+        const app = await loadApp('hub', user);
+        setupAuthListener(app);
+      });
+      document.getElementById('selectIND').addEventListener('click', async () => {
+        sessionStorage.setItem('selectedWarehouse', 'indaiatuba');
+        const app = await loadApp('indaiatuba', user);
+        setupAuthListener(app);
+      });
+      document.getElementById('btnLogoutSelector').addEventListener('click', () => {
+        sessionStorage.removeItem('selectedWarehouse');
+        auth.signOut();
+      });
+    }
+
+    // Configurar listener de auth para o app carregado
+    let hasInitialRenderCompleted = false;
+
+    function setupAuthListener(app) {
+      auth.onAuthStateChange((event, session) => {
+        console.log('Auth event:', event, '| Recovery mode:', window.isInRecoveryMode, '| Initial render done:', hasInitialRenderCompleted);
+
+        if (window.isInRecoveryMode) {
+          if (['SIGNED_IN', 'PASSWORD_RECOVERY', 'TOKEN_REFRESHED', 'INITIAL_SESSION'].includes(event)) return;
+          if (event === 'USER_UPDATED') {
+            sessionStorage.removeItem('passwordRecoveryMode');
+            window.isInRecoveryMode = false;
+            app.render(session.user);
+            return;
+          }
+        }
+
+        // Ignorar eventos de token refresh / session restore após o render inicial
+        // Isso evita recarregar a página no alt-tab
+        if (hasInitialRenderCompleted && ['TOKEN_REFRESHED', 'INITIAL_SESSION'].includes(event)) {
+          return;
+        }
+
+        if (event === 'SIGNED_OUT') {
+          window.isInRecoveryMode = false;
+          hasInitialRenderCompleted = false;
+          sessionStorage.removeItem('passwordRecoveryMode');
+          sessionStorage.removeItem('selectedWarehouse');
+          app.render(null);
+        } else if (event === 'PASSWORD_RECOVERY') {
+          window.isInRecoveryMode = true;
+          sessionStorage.setItem('passwordRecoveryMode', 'true');
+          app.showPasswordResetScreen();
+        } else if (event === 'SIGNED_IN') {
+          // Após render inicial, ignorar SIGNED_IN subsequentes (token refresh)
+          if (hasInitialRenderCompleted) return;
+
+          const warehouse = sessionStorage.getItem('selectedWarehouse');
+          if (warehouse) {
+            app.render(session.user);
+            hasInitialRenderCompleted = true;
+          } else {
+            showWarehouseSelector(session.user);
+            hasInitialRenderCompleted = true;
+          }
+        }
+      });
+    }
+
+    // Init
+    async function init() {
+      const isRecoveryFlow = sessionStorage.getItem('passwordRecoveryMode') === 'true' || window.isInRecoveryMode === true;
+      window.isInRecoveryMode = isRecoveryFlow;
+
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const user = await auth.getCurrentUser();
+
+      if (isRecoveryFlow) {
+        window.history.replaceState(null, '', window.location.pathname);
+      }
+
+      if (!user) {
+        // Sem usuario: carregar HUB por padrão para mostrar tela de login
+        const app = await loadApp('hub', null);
+        setupAuthListener(app);
+        return;
+      }
+
+      // Recovery flow
+      if (isRecoveryFlow) {
+        const app = await loadApp('hub', user);
+        app.showPasswordResetScreen();
+        setupAuthListener(app);
+        return;
+      }
+
+      // Verificar armazém selecionado
+      const warehouse = sessionStorage.getItem('selectedWarehouse');
+      if (warehouse) {
+        const app = await loadApp(warehouse, user);
+        hasInitialRenderCompleted = true; // App já renderizado, ignorar auth events subsequentes
+        setupAuthListener(app);
+      } else {
+        // Mostrar seletor
+        showWarehouseSelector(user);
+        // Listener mínimo para logout do seletor
+        auth.onAuthStateChange((event, session) => {
+          if (event === 'SIGNED_OUT') {
+            sessionStorage.removeItem('selectedWarehouse');
+            location.reload();
+          } else if (event === 'SIGNED_IN') {
+            const wh = sessionStorage.getItem('selectedWarehouse');
+            if (wh) location.reload();
+          }
+        });
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>
